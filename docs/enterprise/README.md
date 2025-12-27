@@ -76,6 +76,22 @@
    - Testing strategy
    - Success metrics
 
+10. **[12-implementation-status.md](12-implementation-status.md)** - Current implementation status ✅
+   - High priority features completed (4/4)
+   - Medium priority features completed (6/6)
+   - Quota enforcement and rate limiting
+   - Enhanced metrics and monitoring
+   - Raft consensus with snapshots
+   - Build validation and code quality
+
+11. **[13-development-guide.md](13-development-guide.md)** - Developer quick reference
+   - Local development setup
+   - Testing workflows
+   - Code style and conventions
+   - Debugging techniques
+   - Performance profiling
+   - Git workflow
+
 ---
 
 ## 🎯 Quick Reference
@@ -220,15 +236,22 @@ docker-compose up
 
 ## 📖 Implementation Roadmap
 
-### Phase 1: Foundation (Weeks 1-8)
+### Phase 1: Foundation (Weeks 1-8) ✅ COMPLETE
 ✅ Control Plane (BadgerDB + Raft)
 ✅ Tenant Node (stateless worker)
 ✅ Gateway (reverse proxy)
 ✅ Litestream integration
+✅ JWT authentication
+✅ Email verification system
+✅ Tenant archiving and restoration
 
-### Phase 2: Production Hardening (Weeks 9-14)
-⬜ Placement & migration
-⬜ Resource quotas
+### Phase 2: Production Hardening (Weeks 9-14) 🚧 IN PROGRESS
+✅ Resource quotas (storage + API rate limiting)
+✅ Enhanced metrics collection
+✅ Raft consensus with snapshots
+✅ Raft peer parsing and clustering
+✅ Control plane notifications
+⬜ Tenant placement & migration
 ⬜ Observability (Prometheus, tracing)
 
 ### Phase 3: Security (Weeks 15-20)
@@ -247,6 +270,7 @@ docker-compose up
 ⬜ Load testing & optimization
 
 **Total: 32 weeks (~8 months)**
+**Current Progress: ~45% complete** (Phase 1 done, Phase 2 ~70% done)
 
 ---
 
@@ -356,9 +380,26 @@ See [LICENSE.md](../../LICENSE.md) for details.
 
 ## 📊 Project Status
 
-**Current Phase**: Planning & Documentation
+**Current Phase**: Phase 2 - Production Hardening (70% complete)
 **Target Launch**: Q3 2025
 **Current Version**: Enterprise Preview
+**Last Updated**: November 2025
+
+### Recent Milestones
+✅ **November 2025**
+- Storage quota enforcement implemented
+- API rate limiting with 24-hour windows
+- Database growth rate tracking
+- Peak request monitoring
+- Response time and error rate tracking
+- Raft snapshots for state backup/restore
+- Control plane notifications system
+- Build validation: all tests passing
+
+### Next Up
+- Tenant placement optimization
+- Prometheus metrics integration
+- Distributed tracing support
 
 ---
 

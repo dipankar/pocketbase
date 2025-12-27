@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/pocketbase/pocketbase/core/enterprise"
@@ -17,6 +18,8 @@ import (
 type ControlPlaneClient struct {
 	controlPlaneAddrs []string
 	socket            mangos.Socket
+	socketMu          sync.Mutex // Protects socket send/recv ordering
+	circuitBreaker    *enterprise.CircuitBreaker
 	logger            *log.Logger
 }
 
@@ -44,9 +47,18 @@ func NewControlPlaneClient(controlPlaneAddrs []string) (*ControlPlaneClient, err
 		}
 	}
 
+	// Create circuit breaker for control plane communication
+	cb := enterprise.NewCircuitBreaker(enterprise.CircuitBreakerConfig{
+		Name:            "control-plane",
+		MaxFailures:     5,
+		ResetTimeout:    30 * time.Second,
+		HalfOpenMaxReqs: 3,
+	})
+
 	return &ControlPlaneClient{
 		controlPlaneAddrs: controlPlaneAddrs,
 		socket:            socket,
+		circuitBreaker:    cb,
 		logger:            log.Default(),
 	}, nil
 }
@@ -56,8 +68,18 @@ func (c *ControlPlaneClient) Close() error {
 	return c.socket.Close()
 }
 
-// request sends a request to the control plane and returns the response
-func (c *ControlPlaneClient) request(reqType string, data map[string]interface{}) (map[string]interface{}, error) {
+// requestWithContext sends a request with context support for cancellation and timeout
+func (c *ControlPlaneClient) requestWithContext(ctx context.Context, reqType string, data map[string]interface{}) (map[string]interface{}, error) {
+	// Check if context is already cancelled
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled: %w", err)
+	}
+
+	// Check circuit breaker before making request
+	if c.circuitBreaker.State() == enterprise.CircuitOpen {
+		return nil, fmt.Errorf("control plane circuit breaker is open: %w", enterprise.ErrCircuitOpen)
+	}
+
 	req := map[string]interface{}{
 		"type": reqType,
 		"data": data,
@@ -68,37 +90,92 @@ func (c *ControlPlaneClient) request(reqType string, data map[string]interface{}
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Send request
-	if err := c.socket.Send(reqJSON); err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+	// Use a channel to handle context cancellation
+	type result struct {
+		data map[string]interface{}
+		err  error
 	}
+	resultCh := make(chan result, 1)
 
-	// Receive response
-	respJSON, err := c.socket.Recv()
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive response: %w", err)
+	go func() {
+		// Lock to ensure send-recv ordering for REQ socket
+		c.socketMu.Lock()
+		defer c.socketMu.Unlock()
+
+		// Adjust socket timeout based on context deadline
+		if deadline, ok := ctx.Deadline(); ok {
+			timeout := time.Until(deadline)
+			if timeout > 0 {
+				c.socket.SetOption(mangos.OptionRecvDeadline, timeout)
+				c.socket.SetOption(mangos.OptionSendDeadline, timeout)
+				// Reset to default after request
+				defer func() {
+					c.socket.SetOption(mangos.OptionRecvDeadline, 5*time.Second)
+					c.socket.SetOption(mangos.OptionSendDeadline, 5*time.Second)
+				}()
+			}
+		}
+
+		// Send request
+		if err := c.socket.Send(reqJSON); err != nil {
+			resultCh <- result{nil, fmt.Errorf("failed to send request: %w", err)}
+			return
+		}
+
+		// Receive response
+		respJSON, err := c.socket.Recv()
+		if err != nil {
+			resultCh <- result{nil, fmt.Errorf("failed to receive response: %w", err)}
+			return
+		}
+
+		var resp struct {
+			Success bool                   `json:"success"`
+			Data    map[string]interface{} `json:"data"`
+			Error   string                 `json:"error"`
+		}
+
+		if err := json.Unmarshal(respJSON, &resp); err != nil {
+			resultCh <- result{nil, fmt.Errorf("failed to unmarshal response: %w", err)}
+			return
+		}
+
+		if !resp.Success {
+			resultCh <- result{nil, fmt.Errorf("control plane error: %s", resp.Error)}
+			return
+		}
+
+		resultCh <- result{resp.Data, nil}
+	}()
+
+	// Wait for either context cancellation or result
+	select {
+	case <-ctx.Done():
+		// Record timeout/cancellation as failure for circuit breaker
+		c.circuitBreaker.Execute(func() error {
+			return ctx.Err()
+		})
+		return nil, fmt.Errorf("request cancelled: %w", ctx.Err())
+	case res := <-resultCh:
+		// Record result for circuit breaker
+		c.circuitBreaker.Execute(func() error {
+			return res.err
+		})
+		return res.data, res.err
 	}
+}
 
-	var resp struct {
-		Success bool                   `json:"success"`
-		Data    map[string]interface{} `json:"data"`
-		Error   string                 `json:"error"`
-	}
-
-	if err := json.Unmarshal(respJSON, &resp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	if !resp.Success {
-		return nil, fmt.Errorf("control plane error: %s", resp.Error)
-	}
-
-	return resp.Data, nil
+// request sends a request to the control plane (deprecated: use requestWithContext)
+func (c *ControlPlaneClient) request(reqType string, data map[string]interface{}) (map[string]interface{}, error) {
+	// Use a default timeout context
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return c.requestWithContext(ctx, reqType, data)
 }
 
 // GetTenantMetadata retrieves tenant metadata from control plane
 func (c *ControlPlaneClient) GetTenantMetadata(ctx context.Context, tenantID string) (*enterprise.Tenant, error) {
-	data, err := c.request("getTenant", map[string]interface{}{
+	data, err := c.requestWithContext(ctx, "getTenant", map[string]interface{}{
 		"tenantId": tenantID,
 	})
 	if err != nil {
@@ -122,7 +199,7 @@ func (c *ControlPlaneClient) GetTenantMetadata(ctx context.Context, tenantID str
 
 // GetTenantByDomain retrieves tenant by domain name
 func (c *ControlPlaneClient) GetTenantByDomain(ctx context.Context, domain string) (*enterprise.Tenant, error) {
-	data, err := c.request("getTenantByDomain", map[string]interface{}{
+	data, err := c.requestWithContext(ctx, "getTenantByDomain", map[string]interface{}{
 		"domain": domain,
 	})
 	if err != nil {
@@ -146,7 +223,7 @@ func (c *ControlPlaneClient) GetTenantByDomain(ctx context.Context, domain strin
 
 // UpdateTenantStatus updates tenant status
 func (c *ControlPlaneClient) UpdateTenantStatus(ctx context.Context, tenantID string, status enterprise.TenantStatus) error {
-	_, err := c.request("updateTenantStatus", map[string]interface{}{
+	_, err := c.requestWithContext(ctx, "updateTenantStatus", map[string]interface{}{
 		"tenantId": tenantID,
 		"status":   string(status),
 	})
@@ -155,7 +232,7 @@ func (c *ControlPlaneClient) UpdateTenantStatus(ctx context.Context, tenantID st
 
 // RegisterNode registers a tenant node with the control plane
 func (c *ControlPlaneClient) RegisterNode(ctx context.Context, nodeInfo *enterprise.NodeInfo) error {
-	_, err := c.request("registerNode", map[string]interface{}{
+	_, err := c.requestWithContext(ctx, "registerNode", map[string]interface{}{
 		"nodeId":   nodeInfo.ID,
 		"address":  nodeInfo.Address,
 		"capacity": nodeInfo.Capacity,
@@ -165,7 +242,7 @@ func (c *ControlPlaneClient) RegisterNode(ctx context.Context, nodeInfo *enterpr
 
 // SendHeartbeat sends a heartbeat from this node
 func (c *ControlPlaneClient) SendHeartbeat(ctx context.Context, nodeID string, activeTenantsCount int) error {
-	_, err := c.request("heartbeat", map[string]interface{}{
+	_, err := c.requestWithContext(ctx, "heartbeat", map[string]interface{}{
 		"nodeId":             nodeID,
 		"activeTenantsCount": activeTenantsCount,
 	})
@@ -174,7 +251,7 @@ func (c *ControlPlaneClient) SendHeartbeat(ctx context.Context, nodeID string, a
 
 // GetPlacementDecision requests placement decision for a tenant
 func (c *ControlPlaneClient) GetPlacementDecision(ctx context.Context, tenantID string) (*enterprise.PlacementDecision, error) {
-	data, err := c.request("assignTenant", map[string]interface{}{
+	data, err := c.requestWithContext(ctx, "assignTenant", map[string]interface{}{
 		"tenantId": tenantID,
 	})
 	if err != nil {

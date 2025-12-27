@@ -19,13 +19,13 @@ type JWTManager struct {
 // NewJWTManager creates a new JWT manager with a secret key
 // If secretKey is empty, a cryptographically secure random key is generated
 // WARNING: Random keys are not persistent across restarts - set POCKETBASE_JWT_SECRET for production
-func NewJWTManager(secretKey string) *JWTManager {
+func NewJWTManager(secretKey string) (*JWTManager, error) {
 	if secretKey == "" {
 		// Generate a secure random key (32 bytes = 256 bits)
 		randomKey := make([]byte, 32)
 		_, err := rand.Read(randomKey)
 		if err != nil {
-			panic(fmt.Sprintf("failed to generate JWT secret: %v", err))
+			return nil, fmt.Errorf("failed to generate JWT secret: %w", err)
 		}
 		secretKey = base64.StdEncoding.EncodeToString(randomKey)
 		log.Printf("[JWT] WARNING: No JWT secret provided, generated random key")
@@ -35,7 +35,7 @@ func NewJWTManager(secretKey string) *JWTManager {
 
 	return &JWTManager{
 		secretKey: secretKey,
-	}
+	}, nil
 }
 
 // ClusterUserClaims represents JWT claims for cluster users

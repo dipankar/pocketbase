@@ -283,7 +283,10 @@ func runControlPlane(config *enterprise.ClusterConfig) error {
 	}
 
 	// Create and start HTTP API server
-	router := enterpriseapis.NewRouter(cp, config.JWTSecret)
+	router, err := enterpriseapis.NewRouter(cp, config.JWTSecret)
+	if err != nil {
+		return fmt.Errorf("failed to create router: %w", err)
+	}
 	if err := cp.StartHTTP(":8095", router); err != nil {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
 	}
@@ -332,17 +335,36 @@ func runTenantNode(config *enterprise.ClusterConfig) error {
 		return fmt.Errorf("failed to start tenant manager: %w", err)
 	}
 
-	// TODO: Start HTTP server to handle tenant requests
+	// Create and start HTTP server to handle tenant requests
+	httpServer := tenant_node.NewHTTPServer(manager)
 
-	// Wait for shutdown signal
+	// Start HTTP server in background
+	errChan := make(chan error, 1)
+	go func() {
+		log.Printf("[TenantNode] Starting HTTP server on :8091")
+		errChan <- httpServer.Start(":8091")
+	}()
+
+	// Wait for shutdown signal or error
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	log.Printf("[TenantNode] Tenant node running. Press Ctrl+C to stop.")
-	<-sigChan
+	log.Printf("[TenantNode] Tenant node running on :8091. Press Ctrl+C to stop.")
 
-	log.Printf("[TenantNode] Shutting down...")
-	return manager.Stop()
+	select {
+	case err := <-errChan:
+		return fmt.Errorf("HTTP server error: %w", err)
+	case <-sigChan:
+		log.Printf("[TenantNode] Shutting down...")
+
+		// Stop HTTP server first
+		if err := httpServer.Stop(); err != nil {
+			log.Printf("[TenantNode] Error stopping HTTP server: %v", err)
+		}
+
+		// Stop tenant manager
+		return manager.Stop()
+	}
 }
 
 // runGateway starts the gateway service
@@ -422,6 +444,16 @@ func runAllInOne(config *enterprise.ClusterConfig) error {
 		return fmt.Errorf("failed to start tenant manager: %w", err)
 	}
 	defer manager.Stop()
+
+	// Start tenant node HTTP server
+	tenantHTTPServer := tenant_node.NewHTTPServer(manager)
+	go func() {
+		log.Printf("[AllInOne] Starting tenant node HTTP server on :8091")
+		if err := tenantHTTPServer.Start(":8091"); err != nil {
+			log.Printf("[AllInOne] Tenant HTTP server error: %v", err)
+		}
+	}()
+	defer tenantHTTPServer.Stop()
 
 	// 3. Start gateway
 	gw, err := gateway.NewGateway(config, cpClient)

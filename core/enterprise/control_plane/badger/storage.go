@@ -564,6 +564,50 @@ func (s *Storage) ListNodes() ([]*enterprise.NodeInfo, error) {
 	return nodes, err
 }
 
+// ListTenantsByNode returns all tenants assigned to a specific node
+func (s *Storage) ListTenantsByNode(nodeID string) ([]*enterprise.Tenant, error) {
+	tenants := make([]*enterprise.Tenant, 0)
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(keyPrefixTenant)
+
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+
+			err := item.Value(func(val []byte) error {
+				var tenant enterprise.Tenant
+				if err := json.Unmarshal(val, &tenant); err != nil {
+					return err
+				}
+
+				// Skip deleted tenants
+				if tenant.Status == enterprise.TenantStatusDeleted {
+					return nil
+				}
+
+				// Filter by assigned node
+				if tenant.AssignedNodeID == nodeID {
+					tenants = append(tenants, &tenant)
+				}
+
+				return nil
+			})
+
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	return tenants, err
+}
+
 // Placement operations
 
 func (s *Storage) SavePlacement(placement *enterprise.PlacementDecision) error {
@@ -896,4 +940,126 @@ func (s *Storage) MarkVerificationTokenUsed(token string) error {
 
 		return txn.Set([]byte(keyPrefixVerificationToken+token), tokenJSON)
 	})
+}
+
+// UseVerificationTokenAtomically validates and marks a token as used in a single atomic operation
+// This prevents double-use of tokens due to race conditions
+func (s *Storage) UseVerificationTokenAtomically(token string) (*enterprise.VerificationToken, error) {
+	var verificationToken enterprise.VerificationToken
+
+	err := s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(keyPrefixVerificationToken + token))
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return fmt.Errorf("verification token not found or expired")
+			}
+			return err
+		}
+
+		err = item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &verificationToken)
+		})
+		if err != nil {
+			return err
+		}
+
+		// Check expiration
+		if time.Now().After(verificationToken.Expires) {
+			return fmt.Errorf("verification token expired")
+		}
+
+		// Check if already used
+		if verificationToken.Used {
+			return fmt.Errorf("verification token already used")
+		}
+
+		// Mark as used in the same transaction
+		verificationToken.Used = true
+
+		tokenJSON, err := json.Marshal(&verificationToken)
+		if err != nil {
+			return err
+		}
+
+		return txn.Set([]byte(keyPrefixVerificationToken+token), tokenJSON)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &verificationToken, nil
+}
+
+// ExportData exports all key-value pairs from BadgerDB
+// The visitor function is called for each key-value pair
+func (s *Storage) ExportData(visitor func(key, value []byte) error) error {
+	return s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchSize = 100 // Prefetch for better performance
+
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := item.Key()
+
+			err := item.Value(func(val []byte) error {
+				// Call visitor with copies of key and value
+				keyCopy := append([]byte(nil), key...)
+				valCopy := append([]byte(nil), val...)
+				return visitor(keyCopy, valCopy)
+			})
+
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+// ImportData imports key-value pairs into BadgerDB
+// This clears existing data and restores from the provided entries
+func (s *Storage) ImportData(entries []SnapshotEntry) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		// First, delete all existing keys
+		// We need to iterate and collect keys to delete
+		keysToDelete := make([][]byte, 0)
+
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchSize = 100
+
+		it := txn.NewIterator(opts)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := item.KeyCopy(nil)
+			keysToDelete = append(keysToDelete, key)
+		}
+		it.Close()
+
+		// Delete all keys
+		for _, key := range keysToDelete {
+			if err := txn.Delete(key); err != nil {
+				return fmt.Errorf("failed to delete key during restore: %w", err)
+			}
+		}
+
+		// Import new data
+		for _, entry := range entries {
+			if err := txn.Set(entry.Key, entry.Value); err != nil {
+				return fmt.Errorf("failed to set key during restore: %w", err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// SnapshotEntry represents a key-value pair for import/export
+type SnapshotEntry struct {
+	Key   []byte
+	Value []byte
 }

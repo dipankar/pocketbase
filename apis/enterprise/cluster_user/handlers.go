@@ -75,9 +75,18 @@ func (api *API) HandleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if user already exists
+	// Return a generic success message to prevent email enumeration
 	existingUser, _ := api.cp.GetUserByEmail(req.Email)
 	if existingUser != nil {
-		http.Error(w, "User with this email already exists", http.StatusConflict)
+		// Log for debugging but don't reveal to user
+		api.logger.Printf("[Signup] Attempted registration with existing email: %s", req.Email)
+
+		// Return same response as success to prevent email enumeration
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "If this email is not already registered, an account has been created. Please check your email to verify your account.",
+		})
 		return
 	}
 
@@ -409,8 +418,8 @@ func (api *API) HandleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get and validate verification token
-	verificationToken, err := api.cp.GetVerificationToken(tokenStr)
+	// Atomically validate and mark token as used (prevents double-use race condition)
+	verificationToken, err := api.cp.UseVerificationTokenAtomically(tokenStr)
 	if err != nil {
 		api.logger.Printf("[Verification] Invalid token: %v", err)
 		http.Error(w, "Invalid or expired verification token", http.StatusBadRequest)
@@ -425,7 +434,7 @@ func (api *API) HandleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if already verified
+	// Check if already verified (could happen if same user verifies with different token)
 	if user.Verified {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -445,11 +454,7 @@ func (api *API) HandleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark token as used
-	if err := api.cp.MarkVerificationTokenUsed(tokenStr); err != nil {
-		api.logger.Printf("[Verification] Failed to mark token as used: %v", err)
-		// Don't fail the verification if we can't mark the token
-	}
+	// Token is already marked as used by UseVerificationTokenAtomically
 
 	api.logger.Printf("[Verification] Email verified for user: %s", user.Email)
 
@@ -486,9 +491,13 @@ func (api *API) HandleResendVerification(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// If already verified, don't send
+	// If already verified, return same generic message to prevent enumeration
 	if user.Verified {
-		http.Error(w, "Email already verified", http.StatusBadRequest)
+		api.logger.Printf("[Verification] Resend attempted for already verified email: %s", req.Email)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": "If the email exists and is not yet verified, a verification link has been sent.",
+		})
 		return
 	}
 

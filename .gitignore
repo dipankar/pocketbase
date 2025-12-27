@@ -18,3 +18,20 @@ CHANGELOG.html
 CHANGELOG_16_22.html
 CHANGELOG_8_15.html
 LICENSE.html
+
+# compiled binaries
+/pocketbase
+/pocketbase.exe
+
+# enterprise development artifacts
+/data/
+/tenants/
+/control-plane/
+*.db
+*.db-shm
+*.db-wal
+
+# local config files
+.env
+.env.local
+config.local.json

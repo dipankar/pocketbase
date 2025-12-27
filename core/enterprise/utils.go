@@ -10,9 +10,12 @@ import (
 
 // GenerateID generates a unique ID with a prefix
 // Examples: tenant_abc123, user_xyz789, node_def456
+// Panics if cryptographic random generation fails (system issue)
 func GenerateID(prefix string) string {
 	randomBytes := make([]byte, 12)
-	rand.Read(randomBytes)
+	if _, err := rand.Read(randomBytes); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
 	encoded := base64.URLEncoding.EncodeToString(randomBytes)
 	// Remove padding and make URL-safe
 	encoded = strings.TrimRight(encoded, "=")
@@ -37,18 +40,24 @@ func GenerateNodeID() string {
 }
 
 // GenerateAdminToken generates a long-lived admin token
+// Panics if cryptographic random generation fails (system issue)
 func GenerateAdminToken() string {
 	randomBytes := make([]byte, 32)
-	rand.Read(randomBytes)
+	if _, err := rand.Read(randomBytes); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
 	encoded := base64.URLEncoding.EncodeToString(randomBytes)
 	encoded = strings.TrimRight(encoded, "=")
 	return fmt.Sprintf("admin_%s", encoded[:40])
 }
 
 // GenerateSessionToken generates a session token for cluster users
+// Panics if cryptographic random generation fails (system issue)
 func GenerateSessionToken() string {
 	randomBytes := make([]byte, 24)
-	rand.Read(randomBytes)
+	if _, err := rand.Read(randomBytes); err != nil {
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
 	encoded := base64.URLEncoding.EncodeToString(randomBytes)
 	encoded = strings.TrimRight(encoded, "=")
 	return encoded

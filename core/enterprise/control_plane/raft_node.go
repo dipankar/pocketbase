@@ -16,8 +16,17 @@ type RaftNode struct {
 // NewRaftNode creates a new Raft node for the control plane
 func NewRaftNode(config *enterprise.ClusterConfig, storage *BadgerStorage) (*RaftNode, error) {
 	// Create FSM with callbacks to storage
+	// Wrap ApplyRaftLog to decode bytes first
+	applyFunc := func(data []byte) error {
+		cmd, err := DecodeRaftCommand(data)
+		if err != nil {
+			return err
+		}
+		return storage.ApplyRaftLog(cmd)
+	}
+
 	fsm := raft.NewFSM(
-		storage.ApplyRaftLog,
+		applyFunc,
 		storage.Snapshot,
 		storage.Restore,
 	)
@@ -28,10 +37,15 @@ func NewRaftNode(config *enterprise.ClusterConfig, storage *BadgerStorage) (*Raf
 		return nil, err
 	}
 
-	return &RaftNode{
+	rn := &RaftNode{
 		node:    node,
 		storage: storage,
-	}, nil
+	}
+
+	// Wire up storage with Raft node
+	storage.SetRaftNode(rn)
+
+	return rn, nil
 }
 
 // IsLeader returns true if this node is the Raft leader
@@ -41,8 +55,8 @@ func (rn *RaftNode) IsLeader() bool {
 
 // Apply applies a command to the Raft log
 // This should be used for all state-changing operations
-func (rn *RaftNode) Apply(cmd []byte) error {
-	return rn.node.Apply(cmd, 10*time.Second)
+func (rn *RaftNode) Apply(cmd []byte, timeout time.Duration) error {
+	return rn.node.Apply(cmd, timeout)
 }
 
 // Shutdown gracefully shuts down the Raft node

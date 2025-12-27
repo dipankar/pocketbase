@@ -78,20 +78,50 @@ func NewNode(config *enterprise.ClusterConfig, fsm *FSM) (*Node, error) {
 
 	// Bootstrap cluster if this is the first node
 	if len(config.RaftPeers) > 0 {
-		configuration := raft.Configuration{
-			Servers: []raft.Server{
-				{
-					ID:      raft.ServerID(config.NodeID),
-					Address: transport.LocalAddr(),
-				},
+		// Start with this node in the configuration
+		servers := []raft.Server{
+			{
+				ID:      raft.ServerID(config.NodeID),
+				Address: transport.LocalAddr(),
 			},
 		}
 
-		// TODO: Parse peers from config.RaftPeers and add to configuration
+		// Parse and add peer nodes from config
+		// RaftPeers format: ["node1:7000", "node2:7000", "node3:7000"]
+		// Each peer address should be formatted as "host:port"
+		for i, peerAddr := range config.RaftPeers {
+			// Skip if this is our own address
+			if peerAddr == bindAddr {
+				continue
+			}
 
+			// Generate a server ID for the peer (could be specified in config in the future)
+			// For now, use a simple numeric suffix
+			peerID := fmt.Sprintf("node%d", i+1)
+
+			// If the peer address matches our bind address, use our node ID
+			peerTCPAddr, err := net.ResolveTCPAddr("tcp", peerAddr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve peer address %s: %w", peerAddr, err)
+			}
+
+			servers = append(servers, raft.Server{
+				ID:      raft.ServerID(peerID),
+				Address: raft.ServerAddress(peerTCPAddr.String()),
+			})
+		}
+
+		configuration := raft.Configuration{
+			Servers: servers,
+		}
+
+		// Bootstrap cluster with all peers
+		// Note: BootstrapCluster should only be called on ONE node in the cluster
+		// All nodes should have the same peer list, but only one should actually bootstrap
 		f := r.BootstrapCluster(configuration)
 		if err := f.Error(); err != nil {
 			// Ignore error if already bootstrapped
+			// This is expected if another node already bootstrapped the cluster
 			if err != raft.ErrCantBootstrap {
 				return nil, fmt.Errorf("failed to bootstrap cluster: %w", err)
 			}

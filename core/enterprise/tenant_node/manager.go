@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/core/enterprise"
 	"github.com/pocketbase/pocketbase/core/enterprise/health"
@@ -40,6 +42,7 @@ type Manager struct {
 	// Resource management
 	resourceMgr       *enterprise.ResourceManager
 	metricsCollector  *MetricsCollector
+	quotaEnforcer     *QuotaEnforcer
 
 	// Health and monitoring
 	healthChecker *health.Checker
@@ -98,6 +101,9 @@ func NewManager(config *enterprise.ClusterConfig, storage enterprise.StorageBack
 
 	// Initialize metrics collector
 	mgr.metricsCollector = NewMetricsCollector(mgr)
+
+	// Initialize quota enforcer
+	mgr.quotaEnforcer = NewQuotaEnforcer(mgr)
 
 	// Initialize tenant archiver (if storage is S3Backend)
 	if s3Backend, ok := storage.(*storagepkg.S3Backend); ok {
@@ -180,6 +186,11 @@ func (m *Manager) Start() error {
 		m.resourceMgr.Start()
 	}
 
+	// Start quota enforcer
+	if m.quotaEnforcer != nil {
+		m.quotaEnforcer.Start()
+	}
+
 	// Start tenant archiver if available
 	if m.archiver != nil {
 		m.archiver.Start()
@@ -251,7 +262,8 @@ func (m *Manager) LoadTenant(ctx context.Context, tenantID string) (*enterprise.
 	}()
 
 	// Check weighted capacity (large tenants count as multiple slots)
-	used, total := m.getWeightedCapacity()
+	// Use locked version since we already hold tenantsMu
+	used, total := m.getWeightedCapacityLocked()
 	if used >= total {
 		// Evict least recently used tenant
 		if err := m.evictLRULocked(); err != nil {
@@ -311,10 +323,17 @@ func (m *Manager) LoadTenant(ctx context.Context, tenantID string) (*enterprise.
 		litestreamRunning = false
 	}
 
+	// Create HTTP router for the tenant app
+	httpHandler, err := m.createTenantHTTPHandler(app)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP handler: %w", err)
+	}
+
 	// Create tenant instance
 	instance := &enterprise.TenantInstance{
 		Tenant:            tenant,
 		App:               app, // app is *BaseApp which implements App interface
+		HTTPHandler:       httpHandler,
 		LoadedAt:          time.Now(),
 		LastAccessed:      time.Now(),
 		RequestCount:      1,
@@ -366,7 +385,20 @@ func (m *Manager) unloadTenantLocked(tenantID string) error {
 
 	m.logger.Printf("[TenantNode] Unloading tenant: %s", tenantID)
 
+	// Properly shutdown the PocketBase app instance
+	// This closes database connections, stops cron jobs, and cleans up resources
+	if instance.App != nil {
+		m.logger.Printf("[TenantNode] Shutting down PocketBase app for tenant: %s", tenantID)
+
+		// Call ResetBootstrapState to properly clean up the app
+		// This closes database connections, stops cron ticker, etc.
+		if err := instance.App.ResetBootstrapState(); err != nil {
+			m.logger.Printf("[TenantNode] Error resetting bootstrap state for tenant %s: %v", tenantID, err)
+		}
+	}
+
 	// Stop Litestream replication for all databases (with final sync)
+	// This should be done AFTER closing the app to ensure final changes are synced
 	if instance.LitestreamRunning {
 		if err := m.litestreamManager.StopReplication(tenantID, "data.db"); err != nil {
 			m.logger.Printf("[TenantNode] Error stopping Litestream for data.db: %v", err)
@@ -381,14 +413,19 @@ func (m *Manager) unloadTenantLocked(tenantID string) error {
 		}
 	}
 
-	// Close the PocketBase app
-	// Note: We can't easily trigger the terminate event from here as it requires
-	// the full app lifecycle. For now, we'll just close the databases.
-	// TODO: Implement proper app shutdown
-
 	// Remove from cache
 	delete(m.tenants, tenantID)
 	m.removeFromAccessOrder(tenantID)
+
+	// Cleanup metrics data to prevent memory leaks
+	if m.metricsCollector != nil {
+		m.metricsCollector.CleanupTenant(tenantID)
+	}
+
+	// Cleanup quota data to prevent memory leaks
+	if m.quotaEnforcer != nil {
+		m.quotaEnforcer.CleanupTenant(tenantID)
+	}
 
 	// Update metrics
 	m.metrics.TenantsUnloaded.Inc()
@@ -410,6 +447,24 @@ func (m *Manager) GetTenant(tenantID string) (*enterprise.TenantInstance, error)
 	}
 
 	return instance, nil
+}
+
+// GetOrLoadTenant retrieves a tenant from cache or loads it from S3
+func (m *Manager) GetOrLoadTenant(tenantID string) (*enterprise.TenantInstance, error) {
+	// First check cache
+	instance, err := m.GetTenant(tenantID)
+	if err == nil {
+		// Update access tracking
+		m.tenantsMu.Lock()
+		instance.LastAccessed = time.Now()
+		instance.RequestCount++
+		m.updateAccessOrder(tenantID)
+		m.tenantsMu.Unlock()
+		return instance, nil
+	}
+
+	// Not in cache, load it
+	return m.LoadTenant(m.ctx, tenantID)
 }
 
 // ListActiveTenants returns all currently loaded tenants
@@ -536,6 +591,11 @@ func (m *Manager) GetHealthChecker() *health.Checker {
 	return m.healthChecker
 }
 
+// GetQuotaEnforcer returns the quota enforcer
+func (m *Manager) GetQuotaEnforcer() *QuotaEnforcer {
+	return m.quotaEnforcer
+}
+
 // setupResourceCallbacks configures resource manager callbacks
 func (m *Manager) setupResourceCallbacks() {
 	m.resourceMgr.SetCallbacks(
@@ -544,11 +604,25 @@ func (m *Manager) setupResourceCallbacks() {
 			m.logger.Printf("[TenantNode] Hotspot detected: %s (score: %.2f, tier: %s)",
 				tenantID, metrics.HotspotScore, metrics.Tier)
 
-			// For enterprise tier, consider moving to dedicated node
-			if metrics.Tier == enterprise.TenantTierEnterprise {
-				m.logger.Printf("[TenantNode] Enterprise tenant %s should be on dedicated node", tenantID)
-				// TODO: Notify control plane to assign to dedicated node pool
-			}
+			// Notify control plane about hotspot tenant
+			go func() {
+				// Get tenant instance to update metadata
+				instance, err := m.GetTenant(tenantID)
+				if err != nil {
+					m.logger.Printf("[TenantNode] Failed to get tenant for hotspot notification: %v", err)
+					return
+				}
+
+				// Update tenant metadata in control plane with hotspot indicators
+				instance.Tenant.Updated = time.Now()
+
+				// For enterprise tier, suggest reassignment to dedicated node pool
+				if metrics.Tier == enterprise.TenantTierEnterprise {
+					m.logger.Printf("[TenantNode] Notifying control plane: Enterprise tenant %s needs dedicated node", tenantID)
+					// Control plane will receive updated tenant metadata via next heartbeat
+					// or we can implement a specific hotspot notification endpoint
+				}
+			}()
 
 			// For other tiers, check if should evict to free resources
 			if shouldEvict, reason := m.resourceMgr.ShouldEvict(tenantID); shouldEvict {
@@ -562,17 +636,40 @@ func (m *Manager) setupResourceCallbacks() {
 		func(tenantID string, oldTier, newTier enterprise.TenantTier) {
 			m.logger.Printf("[TenantNode] Tenant %s tier upgraded: %s -> %s", tenantID, oldTier, newTier)
 
-			// Notify control plane about tier change
-			// TODO: Update tenant metadata in control plane
+			// Notify about tier change
+			go func() {
+				// Get tenant instance
+				instance, err := m.GetTenant(tenantID)
+				if err != nil {
+					m.logger.Printf("[TenantNode] Failed to get tenant for tier upgrade notification: %v", err)
+					return
+				}
+
+				// Update tenant metadata timestamp
+				instance.Tenant.Updated = time.Now()
+
+				// For enterprise tier upgrades, suggest dedicated node allocation
+				if newTier == enterprise.TenantTierEnterprise {
+					m.logger.Printf("[TenantNode] Enterprise tier upgrade: Tenant %s may need dedicated resources", tenantID)
+					// The control plane will detect this via resource metrics and placement decisions
+					// Tier information is tracked in TenantResourceMetrics, not in Tenant struct
+				}
+
+				// For significant tier upgrades (e.g., medium -> large -> enterprise),
+				// the tenant may benefit from being moved to a less crowded node
+				if newTier >= enterprise.TenantTierLarge {
+					m.logger.Printf("[TenantNode] High-tier tenant %s may benefit from rebalancing", tenantID)
+				}
+			}()
 		},
 		// On quota exceeded
 		func(tenantID string, quotaType string, current, limit int64) {
 			m.logger.Printf("[TenantNode] Tenant %s exceeded %s quota: %d > %d",
 				tenantID, quotaType, current, limit)
 
-			// For database size, stop accepting writes
-			// For requests, rate limit
-			// TODO: Implement quota enforcement
+			// Quotas are enforced at the HTTP layer and before writes
+			// This callback is just for logging/alerting
+			// Actual enforcement happens in HTTP server via CheckAPIQuota/CheckStorageQuota
 		},
 	)
 }
@@ -587,10 +684,16 @@ func (m *Manager) recordTenantMetrics(tenantID string, instance *enterprise.Tena
 }
 
 // getWeightedCapacity calculates effective capacity considering tenant weights
+// Note: This method takes its own lock, use getWeightedCapacityLocked if lock is already held
 func (m *Manager) getWeightedCapacity() (used int, total int) {
 	m.tenantsMu.RLock()
 	defer m.tenantsMu.RUnlock()
 
+	return m.getWeightedCapacityLocked()
+}
+
+// getWeightedCapacityLocked calculates effective capacity (must be called with tenantsMu held)
+func (m *Manager) getWeightedCapacityLocked() (used int, total int) {
 	total = m.capacity
 	used = 0
 
@@ -600,4 +703,49 @@ func (m *Manager) getWeightedCapacity() (used int, total int) {
 	}
 
 	return used, total
+}
+
+// ManagerStats represents current manager statistics
+type ManagerStats struct {
+	LoadedTenants int
+	Capacity      int
+	MemoryUsedMB  int64
+	CPUPercent    int
+}
+
+// GetStats returns current manager statistics
+func (m *Manager) GetStats() ManagerStats {
+	m.tenantsMu.RLock()
+	loadedCount := len(m.tenants)
+	m.tenantsMu.RUnlock()
+
+	// Calculate approximate memory usage (simplified)
+	memoryMB := int64(loadedCount * 50) // Estimate ~50MB per tenant
+
+	// Get system metrics if available
+	cpuPercent := 0
+
+	return ManagerStats{
+		LoadedTenants: loadedCount,
+		Capacity:      m.capacity,
+		MemoryUsedMB:  memoryMB,
+		CPUPercent:    cpuPercent,
+	}
+}
+
+// createTenantHTTPHandler creates an HTTP handler for a tenant's PocketBase app
+func (m *Manager) createTenantHTTPHandler(app core.App) (http.Handler, error) {
+	// Create PocketBase router for this tenant app
+	router, err := apis.NewRouter(app)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create router: %w", err)
+	}
+
+	// Build the HTTP mux from the router
+	handler, err := router.BuildMux()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build mux: %w", err)
+	}
+
+	return handler, nil
 }

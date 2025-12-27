@@ -106,10 +106,11 @@ type NodeInfo struct {
 
 // PlacementDecision represents a decision to place a tenant on a node
 type PlacementDecision struct {
-	TenantID string    `json:"tenantId"`
-	NodeID   string    `json:"nodeId"`
-	Reason   string    `json:"reason"`   // Why this node was chosen
-	DecidedAt time.Time `json:"decidedAt"`
+	TenantID    string    `json:"tenantId"`
+	NodeID      string    `json:"nodeId"`
+	NodeAddress string    `json:"nodeAddress"` // HTTP address of the tenant node (e.g., http://node1:8091)
+	Reason      string    `json:"reason"`      // Why this node was chosen
+	DecidedAt   time.Time `json:"decidedAt"`
 }
 
 // ClusterConfig holds the configuration for the enterprise cluster

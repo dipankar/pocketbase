@@ -80,8 +80,8 @@ func (s *Service) loadTemplates() {
 </html>
 `
 
-	tmpl, _ := template.New("verification").Parse(verificationTemplate)
-	s.templates["verification"] = tmpl
+	// Use template.Must to ensure template parsing errors are caught at startup
+	s.templates["verification"] = template.Must(template.New("verification").Parse(verificationTemplate))
 
 	// Password reset template
 	passwordResetTemplate := `
@@ -122,8 +122,7 @@ func (s *Service) loadTemplates() {
 </html>
 `
 
-	tmpl, _ = template.New("password_reset").Parse(passwordResetTemplate)
-	s.templates["password_reset"] = tmpl
+	s.templates["password_reset"] = template.Must(template.New("password_reset").Parse(passwordResetTemplate))
 }
 
 // SendVerificationEmail sends an email verification email

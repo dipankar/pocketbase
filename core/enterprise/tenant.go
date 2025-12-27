@@ -2,6 +2,7 @@ package enterprise
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/pocketbase/pocketbase/core"
@@ -9,8 +10,9 @@ import (
 
 // TenantInstance represents a running tenant PocketBase instance
 type TenantInstance struct {
-	Tenant *Tenant  // Tenant metadata
-	App    core.App // PocketBase app instance (interface, not pointer)
+	Tenant      *Tenant      // Tenant metadata
+	App         core.App     // PocketBase app instance (interface, not pointer)
+	HTTPHandler http.Handler // HTTP handler for routing requests to this tenant
 
 	// State
 	LoadedAt     time.Time
@@ -70,7 +72,8 @@ type PlacementStrategy interface {
 	ShouldRebalance(nodes []*NodeInfo) bool
 
 	// GenerateRebalancePlan creates a rebalancing plan
-	GenerateRebalancePlan(nodes []*NodeInfo, tenants []*Tenant) ([]*PlacementDecision, error)
+	// nodeTenants maps nodeID to tenants assigned to that node
+	GenerateRebalancePlan(nodes []*NodeInfo, nodeTenants map[string][]*Tenant) ([]*PlacementDecision, error)
 }
 
 // StorageBackend defines the interface for S3 operations

@@ -1,8 +1,10 @@
 package enterprise
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/pocketbase/pocketbase/apis/enterprise/cluster_admin"
 	"github.com/pocketbase/pocketbase/apis/enterprise/cluster_user"
@@ -14,33 +16,41 @@ import (
 
 // Router handles routing for enterprise APIs
 type Router struct {
-	mux        *http.ServeMux
-	cp         *control_plane.ControlPlane
-	userAPI    *cluster_user.API
-	adminAPI   *cluster_admin.API
-	jwtManager *auth.JWTManager
-	logger     *log.Logger
+	mux             *http.ServeMux
+	cp              *control_plane.ControlPlane
+	userAPI         *cluster_user.API
+	adminAPI        *cluster_admin.API
+	jwtManager      *auth.JWTManager
+	authRateLimiter *auth.RateLimiter
+	logger          *log.Logger
 }
 
 // NewRouter creates a new enterprise API router
 // jwtSecret should be loaded from config or environment variable (POCKETBASE_JWT_SECRET)
-func NewRouter(cp *control_plane.ControlPlane, jwtSecret string) *Router {
-	jwtManager := auth.NewJWTManager(jwtSecret)
+func NewRouter(cp *control_plane.ControlPlane, jwtSecret string) (*Router, error) {
+	jwtManager, err := auth.NewJWTManager(jwtSecret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize JWT manager: %w", err)
+	}
 
 	userAPI := cluster_user.NewAPI(cp, jwtManager)
 	adminAPI := cluster_admin.NewAPI(cp, jwtManager)
 
+	// Rate limiter for auth endpoints: 10 requests per minute, 5-minute block on exceed
+	authRateLimiter := auth.NewRateLimiter(10, time.Minute, 5*time.Minute)
+
 	router := &Router{
-		mux:        http.NewServeMux(),
-		cp:         cp,
-		userAPI:    userAPI,
-		adminAPI:   adminAPI,
-		jwtManager: jwtManager,
-		logger:     log.Default(),
+		mux:             http.NewServeMux(),
+		cp:              cp,
+		userAPI:         userAPI,
+		adminAPI:        adminAPI,
+		jwtManager:      jwtManager,
+		authRateLimiter: authRateLimiter,
+		logger:          log.Default(),
 	}
 
 	router.setupRoutes()
-	return router
+	return router, nil
 }
 
 // ServeHTTP implements http.Handler
@@ -60,11 +70,14 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 // setupRoutes configures all API routes
 func (r *Router) setupRoutes() {
-	// Public cluster user routes (no auth required)
-	r.mux.HandleFunc("/api/enterprise/users/signup", r.userAPI.HandleSignup)
-	r.mux.HandleFunc("/api/enterprise/users/login", r.userAPI.HandleLogin)
-	r.mux.HandleFunc("/api/enterprise/users/verify", r.userAPI.HandleVerifyEmail)
-	r.mux.HandleFunc("/api/enterprise/users/resend-verification", r.userAPI.HandleResendVerification)
+	// Rate-limited public auth endpoints (signup, login, verify, resend-verification)
+	// These endpoints are rate-limited to prevent brute force attacks
+	rateLimitedAuth := auth.RateLimitMiddleware(r.authRateLimiter)
+
+	r.mux.Handle("/api/enterprise/users/signup", rateLimitedAuth(http.HandlerFunc(r.userAPI.HandleSignup)))
+	r.mux.Handle("/api/enterprise/users/login", rateLimitedAuth(http.HandlerFunc(r.userAPI.HandleLogin)))
+	r.mux.Handle("/api/enterprise/users/verify", rateLimitedAuth(http.HandlerFunc(r.userAPI.HandleVerifyEmail)))
+	r.mux.Handle("/api/enterprise/users/resend-verification", rateLimitedAuth(http.HandlerFunc(r.userAPI.HandleResendVerification)))
 
 	// Protected cluster user routes (require user JWT)
 	r.mux.Handle("/api/enterprise/users/profile", auth.RequireUserAuth(r.jwtManager)(http.HandlerFunc(r.userAPI.HandleGetProfile)))

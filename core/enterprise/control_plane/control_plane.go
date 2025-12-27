@@ -478,3 +478,9 @@ func (cp *ControlPlane) GetVerificationToken(token string) (*enterprise.Verifica
 func (cp *ControlPlane) MarkVerificationTokenUsed(token string) error {
 	return cp.storage.MarkVerificationTokenUsed(token)
 }
+
+// UseVerificationTokenAtomically validates and marks a token as used in a single atomic operation
+// This prevents double-use of tokens due to race conditions
+func (cp *ControlPlane) UseVerificationTokenAtomically(token string) (*enterprise.VerificationToken, error) {
+	return cp.storage.Storage.UseVerificationTokenAtomically(token)
+}

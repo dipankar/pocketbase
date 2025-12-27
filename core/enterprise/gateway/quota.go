@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pocketbase/pocketbase/core/enterprise"
@@ -105,7 +106,7 @@ func (qe *QuotaEnforcer) CheckQuota(tenantID string, requestSizeBytes int64) err
 
 	// Check daily API request quota
 	if state.APIRequestsQuota > 0 && state.RequestsToday >= state.APIRequestsQuota {
-		qe.rejectedRequests++
+		atomic.AddInt64(&qe.rejectedRequests, 1)
 		return enterprise.NewQuotaError("api_requests", state.RequestsToday, state.APIRequestsQuota)
 	}
 
@@ -113,14 +114,14 @@ func (qe *QuotaEnforcer) CheckQuota(tenantID string, requestSizeBytes int64) err
 	if requestSizeBytes > 0 {
 		requestSizeMB := requestSizeBytes / (1024 * 1024)
 		if state.StorageQuotaMB > 0 && state.StorageUsedMB+requestSizeMB > state.StorageQuotaMB {
-			qe.rejectedStorage++
+			atomic.AddInt64(&qe.rejectedStorage, 1)
 			return enterprise.NewQuotaError("storage", state.StorageUsedMB+requestSizeMB, state.StorageQuotaMB)
 		}
 	}
 
 	// Check rate limit (requests per second)
 	if !qe.checkRateLimit(tenantID) {
-		qe.rejectedRequests++
+		atomic.AddInt64(&qe.rejectedRequests, 1)
 		return enterprise.NewQuotaError("rate_limit", state.RequestsLast1h, 3600)
 	}
 
@@ -345,9 +346,24 @@ func (qe *QuotaEnforcer) GetStats() map[string]interface{} {
 
 	return map[string]interface{}{
 		"trackedTenants":    trackedTenants,
-		"rejectedRequests":  qe.rejectedRequests,
-		"rejectedStorage":   qe.rejectedStorage,
+		"rejectedRequests":  atomic.LoadInt64(&qe.rejectedRequests),
+		"rejectedStorage":   atomic.LoadInt64(&qe.rejectedStorage),
 	}
+}
+
+// CleanupTenant removes quota and rate limiter data for an unloaded tenant
+func (qe *QuotaEnforcer) CleanupTenant(tenantID string) {
+	// Remove quota state
+	qe.quotasMu.Lock()
+	delete(qe.quotas, tenantID)
+	qe.quotasMu.Unlock()
+
+	// Remove rate limiter
+	qe.rateLimitersMu.Lock()
+	delete(qe.rateLimiters, tenantID)
+	qe.rateLimitersMu.Unlock()
+
+	qe.logger.Printf("[QuotaEnforcer] Cleaned up quota data for tenant: %s", tenantID)
 }
 
 // QuotaMiddleware returns HTTP middleware for quota enforcement

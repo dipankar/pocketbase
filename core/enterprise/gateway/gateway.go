@@ -105,10 +105,8 @@ func (g *Gateway) Start(addr string) error {
 		return nil
 	})
 
-	// Wrap handleRequest with quota middleware
-	quotaHandler := g.quotaEnforcer.QuotaMiddleware(http.HandlerFunc(g.handleRequest))
-
-	http.Handle("/", quotaHandler)
+	// Register main request handler (quota is checked inside after tenant resolution)
+	http.Handle("/", http.HandlerFunc(g.handleRequest))
 	http.HandleFunc("/health/live", health.LivenessHandler())
 	http.HandleFunc("/health/ready", health.ReadinessHandler(g.healthChecker))
 	http.HandleFunc("/_health", g.healthChecker.HTTPHandler())
@@ -155,21 +153,51 @@ func (g *Gateway) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check quota after tenant is resolved
+	requestSize := r.ContentLength
+	if requestSize < 0 {
+		requestSize = 0
+	}
+	if err := g.quotaEnforcer.CheckQuota(tenant.ID, requestSize); err != nil {
+		g.logger.Printf("[Gateway] Quota exceeded for tenant %s: %v", tenant.ID, err)
+		statusCode := http.StatusTooManyRequests
+		if quotaErr, ok := err.(*enterprise.QuotaError); ok {
+			if quotaErr.Resource == "storage" {
+				statusCode = http.StatusInsufficientStorage
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(statusCode)
+		fmt.Fprintf(w, `{"error": "%s"}`, err.Error())
+		return
+	}
+
 	// Check if tenant has assigned node
 	nodeAddr := g.getNodeAddress(tenant.ID)
 	if nodeAddr == "" {
 		// No assignment yet, request placement decision
-		_, err := g.cpClient.GetPlacementDecision(r.Context(), tenant.ID)
+		decision, err := g.cpClient.GetPlacementDecision(r.Context(), tenant.ID)
 		if err != nil {
 			g.logger.Printf("[Gateway] Failed to get placement decision: %v", err)
 			http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
-		// Get node info to find address
-		// For now, we'll use a default mapping
-		// TODO: Store node addresses in control plane
-		nodeAddr = fmt.Sprintf("http://localhost:8091") // Default tenant node address
+		// Use the node address from the placement decision
+		nodeAddr = decision.NodeAddress
+		if nodeAddr == "" {
+			g.logger.Printf("[Gateway] Placement decision missing node address for tenant %s", tenant.ID)
+			http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Ensure the address has http:// prefix
+		if !strings.HasPrefix(nodeAddr, "http://") && !strings.HasPrefix(nodeAddr, "https://") {
+			nodeAddr = "http://" + nodeAddr
+		}
+
+		g.logger.Printf("[Gateway] Routing tenant %s to node %s at %s", tenant.ID, decision.NodeID, nodeAddr)
 		g.cacheNodeAddress(tenant.ID, nodeAddr)
 	}
 
