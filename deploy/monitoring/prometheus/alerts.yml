@@ -1,0 +1,189 @@
+# PocketBase Enterprise - Prometheus Alert Rules
+
+groups:
+  # ===========================================================================
+  # Control Plane Alerts
+  # ===========================================================================
+  - name: control-plane
+    rules:
+      - alert: ControlPlaneDown
+        expr: up{job="pocketbase-control-plane"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Control plane node {{ $labels.instance }} is down"
+          description: "Control plane node has been unreachable for more than 1 minute."
+
+      - alert: RaftNoLeader
+        expr: pocketbase_raft_is_leader == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No Raft leader elected"
+          description: "The Raft cluster has no leader for more than 5 minutes. Control plane operations will fail."
+
+      - alert: RaftQuorumLost
+        expr: count(up{job="pocketbase-control-plane"} == 1) < 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Raft quorum lost"
+          description: "Less than 2 control plane nodes are healthy. Cluster cannot achieve consensus."
+
+  # ===========================================================================
+  # Tenant Node Alerts
+  # ===========================================================================
+  - name: tenant-node
+    rules:
+      - alert: TenantNodeDown
+        expr: up{job="pocketbase-tenant-node"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tenant node {{ $labels.instance }} is down"
+          description: "Tenant node has been unreachable for more than 2 minutes."
+
+      - alert: TenantNodeHighTenantCount
+        expr: pocketbase_tenant_node_active_tenants / pocketbase_tenant_node_max_tenants > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tenant node {{ $labels.instance }} is near capacity"
+          description: "Tenant node is using {{ $value | humanizePercentage }} of its tenant capacity."
+
+      - alert: TenantNodeHighCPU
+        expr: rate(process_cpu_seconds_total{job="pocketbase-tenant-node"}[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tenant node {{ $labels.instance }} high CPU usage"
+          description: "Tenant node CPU usage is above 80% for more than 10 minutes."
+
+      - alert: TenantNodeHighMemory
+        expr: process_resident_memory_bytes{job="pocketbase-tenant-node"} / 1024 / 1024 / 1024 > 4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tenant node {{ $labels.instance }} high memory usage"
+          description: "Tenant node is using more than 4GB of memory."
+
+      - alert: TenantLoadLatencyHigh
+        expr: histogram_quantile(0.95, rate(pocketbase_tenant_load_duration_seconds_bucket[5m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High tenant load latency on {{ $labels.instance }}"
+          description: "95th percentile tenant load time is above 5 seconds."
+
+  # ===========================================================================
+  # Gateway Alerts
+  # ===========================================================================
+  - name: gateway
+    rules:
+      - alert: GatewayDown
+        expr: up{job="pocketbase-gateway"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gateway {{ $labels.instance }} is down"
+          description: "Gateway has been unreachable for more than 1 minute. User traffic is affected."
+
+      - alert: GatewayHighErrorRate
+        expr: rate(pocketbase_gateway_requests_total{status=~"5.."}[5m]) / rate(pocketbase_gateway_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate on gateway {{ $labels.instance }}"
+          description: "Gateway is returning more than 5% server errors."
+
+      - alert: GatewayHighLatency
+        expr: histogram_quantile(0.95, rate(pocketbase_gateway_request_duration_seconds_bucket[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High latency on gateway {{ $labels.instance }}"
+          description: "95th percentile request latency is above 1 second."
+
+      - alert: GatewayCircuitBreakerOpen
+        expr: pocketbase_gateway_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker open on gateway {{ $labels.instance }}"
+          description: "Gateway circuit breaker is open, indicating backend issues."
+
+  # ===========================================================================
+  # Storage Alerts
+  # ===========================================================================
+  - name: storage
+    rules:
+      - alert: S3ReplicationLag
+        expr: pocketbase_litestream_replication_lag_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High S3 replication lag for {{ $labels.tenant_id }}"
+          description: "Litestream replication is lagging by more than 60 seconds."
+
+      - alert: TenantStorageQuotaWarning
+        expr: pocketbase_tenant_storage_bytes / pocketbase_tenant_storage_quota_bytes > 0.8
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} approaching storage quota"
+          description: "Tenant is using {{ $value | humanizePercentage }} of storage quota."
+
+      - alert: TenantStorageQuotaExceeded
+        expr: pocketbase_tenant_storage_bytes / pocketbase_tenant_storage_quota_bytes > 0.95
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} near storage limit"
+          description: "Tenant is using {{ $value | humanizePercentage }} of storage quota."
+
+  # ===========================================================================
+  # Cluster Health Alerts
+  # ===========================================================================
+  - name: cluster
+    rules:
+      - alert: NoHealthyTenantNodes
+        expr: count(up{job="pocketbase-tenant-node"} == 1) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No healthy tenant nodes available"
+          description: "All tenant nodes are down. New tenant requests will fail."
+
+      - alert: InsufficientTenantCapacity
+        expr: sum(pocketbase_tenant_node_max_tenants - pocketbase_tenant_node_active_tenants) < 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low tenant capacity across cluster"
+          description: "Less than 10 tenant slots available across all nodes. Consider adding more tenant nodes."
+
+      - alert: HighAPIRequestRate
+        expr: sum(rate(pocketbase_gateway_requests_total[5m])) > 10000
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "High API request rate"
+          description: "Cluster is handling more than 10,000 requests per second."

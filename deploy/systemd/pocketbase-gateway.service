@@ -1,0 +1,46 @@
+[Unit]
+Description=PocketBase Gateway
+Documentation=https://pocketbase.io/docs
+After=network-online.target pocketbase-control-plane.service
+Wants=network-online.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pocketbase
+Group=pocketbase
+ExecStart=/usr/local/bin/pocketbase serve \
+    --mode=gateway \
+    --control-plane-addrs=${CONTROL_PLANE_ADDRS} \
+    --http-addr=0.0.0.0:8080 \
+    --https-addr=0.0.0.0:443
+
+# Environment file for configuration
+EnvironmentFile=/etc/pocketbase/gateway.env
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pocketbase/gateway /var/log/pocketbase
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Allow binding to privileged ports (443)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pocketbase-gateway
+
+[Install]
+WantedBy=multi-user.target

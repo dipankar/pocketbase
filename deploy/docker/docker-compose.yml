@@ -1,0 +1,280 @@
+# PocketBase Enterprise - Local Multi-Node Testing
+#
+# This configuration simulates a production cluster locally:
+# - 3 Control Plane nodes (Raft consensus)
+# - 2 Tenant Nodes (for tenant isolation)
+# - 1 Gateway (request routing)
+# - LocalStack (S3-compatible storage)
+# - Prometheus + Grafana (monitoring)
+#
+# Usage:
+#   docker-compose up -d
+#
+# Access:
+#   Gateway:        http://localhost:8080
+#   Control Plane:  http://localhost:8090
+#   Prometheus:     http://localhost:9090
+#   Grafana:        http://localhost:3000 (admin/admin)
+
+services:
+  # =============================================================================
+  # S3-Compatible Storage (LocalStack)
+  # =============================================================================
+  localstack:
+    image: localstack/localstack:3.0
+    container_name: pb-localstack
+    environment:
+      - SERVICES=s3
+      - DEBUG=0
+      - PERSISTENCE=1
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - ./init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pb-network
+
+  # =============================================================================
+  # Control Plane Cluster (3 nodes for Raft quorum)
+  # =============================================================================
+  control-plane-1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: pb-cp-1
+    command: >
+      serve
+      --mode=control-plane
+      --node-id=cp-1
+      --raft-bind-addr=0.0.0.0:7000
+      --raft-advertise-addr=control-plane-1:7000
+      --data-dir=/data
+      --http-addr=0.0.0.0:8090
+    volumes:
+      - cp1_data:/data
+    ports:
+      - "8090:8090"
+      - "7000:7000"
+    networks:
+      - pb-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8090/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  control-plane-2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: pb-cp-2
+    command: >
+      serve
+      --mode=control-plane
+      --node-id=cp-2
+      --raft-bind-addr=0.0.0.0:7000
+      --raft-advertise-addr=control-plane-2:7000
+      --raft-join=control-plane-1:7000
+      --data-dir=/data
+      --http-addr=0.0.0.0:8090
+    volumes:
+      - cp2_data:/data
+    depends_on:
+      control-plane-1:
+        condition: service_healthy
+    networks:
+      - pb-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8090/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  control-plane-3:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: pb-cp-3
+    command: >
+      serve
+      --mode=control-plane
+      --node-id=cp-3
+      --raft-bind-addr=0.0.0.0:7000
+      --raft-advertise-addr=control-plane-3:7000
+      --raft-join=control-plane-1:7000,control-plane-2:7000
+      --data-dir=/data
+      --http-addr=0.0.0.0:8090
+    volumes:
+      - cp3_data:/data
+    depends_on:
+      control-plane-2:
+        condition: service_healthy
+    networks:
+      - pb-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8090/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =============================================================================
+  # Tenant Nodes (2 nodes for load distribution)
+  # =============================================================================
+  tenant-node-1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: pb-tn-1
+    command: >
+      serve
+      --mode=tenant-node
+      --control-plane-addrs=control-plane-1:8090,control-plane-2:8090,control-plane-3:8090
+      --node-address=tenant-node-1:8091
+      --max-tenants=50
+      --data-dir=/data
+      --http-addr=0.0.0.0:8091
+      --s3-endpoint=http://localstack:4566
+      --s3-bucket=pocketbase-tenants
+      --s3-access-key=test
+      --s3-secret-key=test
+    volumes:
+      - tn1_data:/data
+    depends_on:
+      control-plane-3:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    ports:
+      - "8091:8091"
+    networks:
+      - pb-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8091/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tenant-node-2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: pb-tn-2
+    command: >
+      serve
+      --mode=tenant-node
+      --control-plane-addrs=control-plane-1:8090,control-plane-2:8090,control-plane-3:8090
+      --node-address=tenant-node-2:8091
+      --max-tenants=50
+      --data-dir=/data
+      --http-addr=0.0.0.0:8091
+      --s3-endpoint=http://localstack:4566
+      --s3-bucket=pocketbase-tenants
+      --s3-access-key=test
+      --s3-secret-key=test
+    volumes:
+      - tn2_data:/data
+    depends_on:
+      tenant-node-1:
+        condition: service_healthy
+    networks:
+      - pb-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8091/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =============================================================================
+  # Gateway (Request Router)
+  # =============================================================================
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: pb-gateway
+    command: >
+      serve
+      --mode=gateway
+      --control-plane-addrs=control-plane-1:8090,control-plane-2:8090,control-plane-3:8090
+      --http-addr=0.0.0.0:8080
+    depends_on:
+      tenant-node-2:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - pb-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =============================================================================
+  # Monitoring Stack
+  # =============================================================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: pb-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - pb-network
+    depends_on:
+      - gateway
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: pb-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - pb-network
+    depends_on:
+      - prometheus
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  pb-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  localstack_data:
+  cp1_data:
+  cp2_data:
+  cp3_data:
+  tn1_data:
+  tn2_data:
+  prometheus_data:
+  grafana_data:

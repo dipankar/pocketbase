@@ -92,6 +92,15 @@
    - Performance profiling
    - Git workflow
 
+### Deployment
+12. **[14-deployment.md](14-deployment.md)** - Production deployment guide
+   - Systemd service files
+   - Docker Compose setup
+   - Hetzner Cloud deployment
+   - Monitoring with Prometheus/Grafana
+   - Security configuration
+   - Backup and recovery
+
 ---
 
 ## 🎯 Quick Reference
@@ -223,14 +232,25 @@ curl -H "X-Tenant-ID: test123" http://localhost:8090/api/collections/users
 
 ### 4. Multi-Node Local Cluster
 
-See `docker-compose.yml` for local multi-node setup:
+See `deploy/docker/docker-compose.yml` for local multi-node setup:
 - 3 control plane nodes
 - 2 tenant nodes
 - 1 gateway
+- LocalStack (S3)
+- Prometheus + Grafana
 
 ```bash
-docker-compose up
+cd deploy/docker
+docker-compose up -d
+
+# Access:
+# - Gateway: http://localhost:8080
+# - Control Plane: http://localhost:8090
+# - Prometheus: http://localhost:9090
+# - Grafana: http://localhost:3000 (admin/admin)
 ```
+
+For production deployment, see [14-deployment.md](14-deployment.md).
 
 ---
 
@@ -281,10 +301,11 @@ docker-compose up
 ```
 pocketbase/
 ├── core/
-│   ├── control_plane/      # Raft + BadgerDB
-│   ├── tenant_node/        # Stateless workers
-│   ├── gateway/            # Reverse proxy
-│   ├── storage/            # Litestream integration
+│   ├── enterprise/
+│   │   ├── control_plane/  # Raft + BadgerDB
+│   │   ├── tenant_node/    # Stateless workers
+│   │   ├── gateway/        # Reverse proxy
+│   │   └── storage/        # Litestream integration
 │   └── graphql/            # GraphQL layer
 ├── cmd/
 │   ├── serve.go            # Multi-mode serve command
@@ -292,8 +313,14 @@ pocketbase/
 ├── apis/
 │   ├── control_plane.go    # CP admin APIs
 │   └── tenant_mgmt.go      # Tenant management
-└── docs/
-    └── enterprise/         # This documentation
+├── deploy/                  # Deployment artifacts
+│   ├── systemd/            # Production service files
+│   ├── docker/             # Docker Compose configs
+│   └── monitoring/         # Prometheus + Grafana
+├── docs/
+│   └── enterprise/         # Source documentation
+└── documentation/          # mkdocs site
+    └── docs/enterprise/    # Published docs
 ```
 
 ### Testing Strategy

@@ -1,0 +1,55 @@
+# PocketBase Enterprise - Simple All-in-One Mode
+#
+# Quick local development setup with all components in a single container.
+#
+# Usage:
+#   docker-compose -f docker-compose.simple.yml up -d
+#
+# Access:
+#   Control Plane API: http://localhost:8090
+#   Gateway:           http://localhost:8080
+#   Tenant Nodes:      Running internally
+
+services:
+  localstack:
+    image: localstack/localstack:3.0
+    container_name: pb-localstack-simple
+    environment:
+      - SERVICES=s3
+      - DEBUG=0
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh:ro
+    networks:
+      - pb-simple
+
+  pocketbase:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: pb-all-in-one
+    command: >
+      serve
+      --mode=all-in-one
+      --data-dir=/data
+      --s3-endpoint=http://localstack:4566
+      --s3-bucket=pocketbase-tenants
+      --s3-access-key=test
+      --s3-secret-key=test
+    volumes:
+      - pb_data:/data
+    ports:
+      - "8080:8080"
+      - "8090:8090"
+    depends_on:
+      - localstack
+    networks:
+      - pb-simple
+
+networks:
+  pb-simple:
+    driver: bridge
+
+volumes:
+  pb_data:

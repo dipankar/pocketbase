@@ -1,0 +1,49 @@
+[Unit]
+Description=PocketBase Tenant Node
+Documentation=https://pocketbase.io/docs
+After=network-online.target pocketbase-control-plane.service
+Wants=network-online.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pocketbase
+Group=pocketbase
+ExecStart=/usr/local/bin/pocketbase serve \
+    --mode=tenant-node \
+    --control-plane-addrs=${CONTROL_PLANE_ADDRS} \
+    --node-address=${NODE_ADDRESS} \
+    --max-tenants=${MAX_TENANTS} \
+    --data-dir=/var/lib/pocketbase/tenant-node \
+    --http-addr=0.0.0.0:8091 \
+    --s3-endpoint=${S3_ENDPOINT} \
+    --s3-bucket=${S3_BUCKET} \
+    --s3-access-key=${S3_ACCESS_KEY} \
+    --s3-secret-key=${S3_SECRET_KEY}
+
+# Environment file for configuration
+EnvironmentFile=/etc/pocketbase/tenant-node.env
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pocketbase/tenant-node /var/log/pocketbase
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pocketbase-tenant-node
+
+[Install]
+WantedBy=multi-user.target

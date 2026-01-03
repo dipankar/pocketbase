@@ -1,0 +1,117 @@
+# PocketBase Enterprise - Prometheus Configuration
+#
+# Scrapes metrics from all PocketBase components
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'pocketbase-enterprise'
+
+# Alerting configuration (optional - connect to Alertmanager)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Rule files for alerts
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # =============================================================================
+  # Prometheus self-monitoring
+  # =============================================================================
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # =============================================================================
+  # Control Plane Nodes
+  # =============================================================================
+  - job_name: 'pocketbase-control-plane'
+    metrics_path: /api/metrics
+    # For Docker Compose local testing
+    static_configs:
+      - targets:
+          - 'control-plane-1:8090'
+          - 'control-plane-2:8090'
+          - 'control-plane-3:8090'
+        labels:
+          component: 'control-plane'
+
+    # For production with service discovery (uncomment as needed)
+    # dns_sd_configs:
+    #   - names:
+    #       - 'control-plane.pocketbase.local'
+    #     type: 'A'
+    #     port: 8090
+
+  # =============================================================================
+  # Tenant Nodes
+  # =============================================================================
+  - job_name: 'pocketbase-tenant-node'
+    metrics_path: /api/metrics
+    static_configs:
+      - targets:
+          - 'tenant-node-1:8091'
+          - 'tenant-node-2:8091'
+        labels:
+          component: 'tenant-node'
+
+  # =============================================================================
+  # Gateway
+  # =============================================================================
+  - job_name: 'pocketbase-gateway'
+    metrics_path: /api/metrics
+    static_configs:
+      - targets:
+          - 'gateway:8080'
+        labels:
+          component: 'gateway'
+
+  # =============================================================================
+  # Production Configuration Templates
+  # =============================================================================
+  # Uncomment and customize for Hetzner deployment
+
+  # Hetzner Control Plane (static IPs)
+  # - job_name: 'hetzner-control-plane'
+  #   metrics_path: /api/metrics
+  #   static_configs:
+  #     - targets:
+  #         - '10.0.0.1:8090'
+  #         - '10.0.0.2:8090'
+  #         - '10.0.0.3:8090'
+  #       labels:
+  #         component: 'control-plane'
+  #         environment: 'production'
+  #         datacenter: 'fsn1'
+
+  # Hetzner Tenant Nodes (with relabeling for node identification)
+  # - job_name: 'hetzner-tenant-nodes'
+  #   metrics_path: /api/metrics
+  #   static_configs:
+  #     - targets:
+  #         - '10.0.1.1:8091'
+  #         - '10.0.1.2:8091'
+  #       labels:
+  #         component: 'tenant-node'
+  #         environment: 'production'
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       target_label: node_id
+  #       regex: '(.+):.*'
+  #       replacement: '${1}'
+
+  # Hetzner Gateway (behind load balancer)
+  # - job_name: 'hetzner-gateway'
+  #   metrics_path: /api/metrics
+  #   static_configs:
+  #     - targets:
+  #         - '10.0.2.1:8080'
+  #         - '10.0.2.2:8080'
+  #       labels:
+  #         component: 'gateway'
+  #         environment: 'production'

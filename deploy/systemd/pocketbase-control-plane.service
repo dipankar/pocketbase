@@ -1,0 +1,46 @@
+[Unit]
+Description=PocketBase Control Plane
+Documentation=https://pocketbase.io/docs
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=500
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pocketbase
+Group=pocketbase
+ExecStart=/usr/local/bin/pocketbase serve \
+    --mode=control-plane \
+    --node-id=${NODE_ID} \
+    --raft-bind-addr=${RAFT_BIND_ADDR} \
+    --raft-advertise-addr=${RAFT_ADVERTISE_ADDR} \
+    --raft-join=${RAFT_JOIN} \
+    --data-dir=/var/lib/pocketbase/control-plane \
+    --http-addr=0.0.0.0:8090
+
+# Environment file for configuration
+EnvironmentFile=/etc/pocketbase/control-plane.env
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/pocketbase/control-plane /var/log/pocketbase
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pocketbase-control-plane
+
+[Install]
+WantedBy=multi-user.target

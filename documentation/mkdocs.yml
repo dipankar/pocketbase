@@ -1,0 +1,115 @@
+site_name: PocketBase Documentation
+site_description: Official documentation for PocketBase - Open Source backend in a single file
+site_url: https://pocketbase.io/docs
+
+repo_name: pocketbase/pocketbase
+repo_url: https://github.com/pocketbase/pocketbase
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Introduction: getting-started/introduction.md
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
+      - CLI Commands: getting-started/cli-commands.md
+  - API Reference:
+      - Overview: api/overview.md
+      - Authentication: api/authentication.md
+      - Collections: api/collections.md
+      - Records: api/records.md
+      - Realtime: api/realtime.md
+      - Files: api/files.md
+      - Backups: api/backups.md
+  - Features:
+      - Fields: features/fields.md
+      - Authentication:
+          - Overview: features/authentication/overview.md
+          - Password Auth: features/authentication/password-auth.md
+          - OAuth2: features/authentication/oauth2.md
+          - Email Verification: features/authentication/email-verification.md
+      - Authorization & Rules: features/authorization.md
+      - File Management: features/file-management.md
+      - Email Templates: features/email-templates.md
+  - Development:
+      - Extending with Go: development/extending-go.md
+      - Extending with JavaScript: development/extending-js.md
+      - Hooks & Events: development/hooks-events.md
+      - Migrations: development/migrations.md
+      - Enterprise (Multi-Tenant):
+          - Overview: development/enterprise/overview.md
+          - Architecture: development/enterprise/architecture.md
+          - Control Plane: development/enterprise/control-plane.md
+          - Storage Strategy: development/enterprise/storage.md
+          - Cluster Users: development/enterprise/cluster-users.md
+          - Cluster Admin: development/enterprise/cluster-admin.md
+          - Hooks Database: development/enterprise/hooks-database.md
+          - GraphQL API: development/enterprise/graphql.md
+          - Production Deployment: development/enterprise/deployment.md
+          - Development Guide: development/enterprise/development-guide.md
+  - Admin UI:
+      - Overview: admin-ui/overview.md
+      - Managing Collections: admin-ui/collections.md
+      - Managing Records: admin-ui/records.md
+      - Settings: admin-ui/settings.md
+  - Guides:
+      - Deployment: guides/deployment.md
+      - Production Setup: guides/production.md
+      - Troubleshooting: guides/troubleshooting.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/pocketbase/pocketbase
+    - icon: fontawesome/brands/twitter
+      link: https://twitter.com/pabortosky
+
+copyright: Copyright &copy; 2022 - 2026 PocketBase
